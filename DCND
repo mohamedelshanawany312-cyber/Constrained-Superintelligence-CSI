@@ -1,0 +1,192 @@
+# ============================================================
+# المحاكاة الرقمية المُحسَّنة لإثبات مفهوم DCND (إصدار 2.0)
+# الباحث: محمد الشناوي | يوليو 2026
+# ============================================================
+
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import matplotlib.pyplot as plt
+from sklearn.metrics import mean_absolute_error
+
+# ------------------------------------------
+# 1. الجسد الافتراضي (بدون تغيير)
+# ------------------------------------------
+def generate_body_state(t, noise_scale=2.0):
+    glucose = 90 - t * 0.5 + np.random.normal(0, noise_scale)
+    glucose = max(glucose, 40)
+    bladder = 10 + t * 0.8 + np.random.normal(0, noise_scale)
+    bladder = min(bladder, 100)
+    heart_rate = 70 + np.sin(t / 10) * 15 + np.random.normal(0, noise_scale)
+    heart_rate = max(heart_rate, 50)
+    return np.array([glucose, bladder, heart_rate])
+
+# ------------------------------------------
+# 2. الإشارة العصبية الخام (بدون تغيير)
+# ------------------------------------------
+def body_to_neural_signal(body_state, signal_dim=100, noise_level=0.05):
+    glucose, bladder, heart_rate = body_state
+    signal = np.zeros(signal_dim)
+    signal[10] = glucose / 100.0 + np.random.normal(0, noise_level)
+    signal[25] = bladder / 100.0 + np.random.normal(0, noise_level * 2)
+    signal[50] = heart_rate / 200.0 + np.random.normal(0, noise_level)
+    signal[75] = (glucose * bladder) / 10000.0 + np.random.normal(0, noise_level)
+    signal[88] = np.sin(heart_rate / 20.0) + np.random.normal(0, noise_level)
+    signal += np.random.normal(0, noise_level / 2, signal_dim)
+    return signal
+
+# ------------------------------------------
+# 3. الشبكة العصبية (مع تحسينات)
+# ------------------------------------------
+class NeuralDecoder(nn.Module):
+    def __init__(self, input_dim=100, output_dim=3):
+        super(NeuralDecoder, self).__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, 128),
+            nn.ReLU(),
+            nn.Dropout(0.1),            # إضافة تسرب بسيط لتحسين التعميم
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Linear(64, output_dim),
+            nn.Sigmoid()                # المخرجات ستكون بين 0 و1
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+# ------------------------------------------
+# 4. تجهيز البيانات مع التطبيع
+# ------------------------------------------
+print(">> توليد بيانات المحاكاة...")
+num_samples = 10000
+X = np.zeros((num_samples, 100))
+Y_raw = np.zeros((num_samples, 3))   # القيم الخام
+
+for t in range(num_samples):
+    body = generate_body_state(t)
+    neural = body_to_neural_signal(body)
+    X[t] = neural
+    Y_raw[t] = body
+
+# ---- تطبيع الأهداف لتصبح بين 0 و1 (خطوة محورية) ----
+# سنستخدم الحدود المعروفة لأعضاء الجسم (تقريبية)
+glucose_min, glucose_max = 40.0, 100.0
+bladder_min, bladder_max = 0.0, 100.0
+heart_min, heart_max = 50.0, 100.0
+
+Y_norm = np.zeros_like(Y_raw)
+Y_norm[:,0] = (Y_raw[:,0] - glucose_min) / (glucose_max - glucose_min)
+Y_norm[:,1] = (Y_raw[:,1] - bladder_min) / (bladder_max - bladder_min)
+Y_norm[:,2] = (Y_raw[:,2] - heart_min) / (heart_max - heart_min)
+
+X_tensor = torch.tensor(X, dtype=torch.float32)
+Y_tensor = torch.tensor(Y_norm, dtype=torch.float32)
+
+split = int(0.8 * num_samples)
+X_train, X_test = X_tensor[:split], X_tensor[split:]
+Y_train, Y_test = Y_tensor[:split], Y_tensor[split:]
+Y_test_raw = Y_raw[split:]  # للرجوع للقيم الأصلية لاحقاً
+
+print(f"بيانات التدريب: {X_train.shape[0]} عينة")
+print(f"بيانات الاختبار: {X_test.shape[0]} عينة\n")
+
+# ------------------------------------------
+# 5. التدريب (عصور أكثر)
+# ------------------------------------------
+model = NeuralDecoder()
+criterion = nn.MSELoss()
+optimizer = optim.Adam(model.parameters(), lr=0.001)
+
+epochs = 500
+train_losses = []
+
+print("بدء التدريب (قد يستغرق دقيقة)...")
+for epoch in range(epochs):
+    model.train()
+    pred = model(X_train)
+    loss = criterion(pred, Y_train)
+
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+
+    train_losses.append(loss.item())
+    if (epoch + 1) % 100 == 0:
+        print(f"العصر {epoch+1}/{epochs} - الخطأ: {loss.item():.6f}")
+
+print("اكتمل التدريب!\n")
+
+# ------------------------------------------
+# 6. منحنى التعلم
+# ------------------------------------------
+plt.figure(figsize=(8, 4))
+plt.plot(train_losses)
+plt.title("منحنى التعلم (خطأ التدريب)")
+plt.xlabel("العصر (Epoch)")
+plt.ylabel("MSE")
+plt.grid(True)
+plt.show()
+
+# ------------------------------------------
+# 7. التقييم (إعادة القيم لمقياسها الطبيعي)
+# ------------------------------------------
+model.eval()
+with torch.no_grad():
+    predictions_norm = model(X_test)
+
+pred_np = predictions_norm.numpy()
+true_np_norm = Y_test.numpy()
+
+# إعادة التطبيع إلى القيم الأصلية
+pred_glucose = pred_np[:,0] * (glucose_max - glucose_min) + glucose_min
+pred_bladder = pred_np[:,1] * (bladder_max - bladder_min) + bladder_min
+pred_heart   = pred_np[:,2] * (heart_max - heart_min) + heart_min
+
+true_glucose = Y_test_raw[:,0]
+true_bladder = Y_test_raw[:,1]
+true_heart   = Y_test_raw[:,2]
+
+print("مقارنة القيم الحقيقية والمتوقعة (أول 5 عينات):")
+print("=" * 60)
+for i in range(5):
+    print(f"عينة {i+1}:")
+    print(f"  الجلوكوز: حقيقي {true_glucose[i]:.2f} | متوقع {pred_glucose[i]:.2f}")
+    print(f"  المثانة : حقيقي {true_bladder[i]:.2f} | متوقع {pred_bladder[i]:.2f}")
+    print(f"  القلب   : حقيقي {true_heart[i]:.2f} | متوقع {pred_heart[i]:.2f}")
+    print("")
+
+# ------------------------------------------
+# 8. رسم بياني مقارن (أول 200 عينة)
+# ------------------------------------------
+fig, axes = plt.subplots(3, 1, figsize=(12, 10))
+labels = ["الجلوكوز (mg/dL)", "ضغط المثانة (mmHg)", "معدل ضربات القلب (bpm)"]
+n_show = 200
+
+axes[0].plot(true_glucose[:n_show], label="القيمة الحقيقية", alpha=0.8)
+axes[0].plot(pred_glucose[:n_show], label="القيمة المتوقعة", alpha=0.8, linestyle='--')
+axes[0].set_title(labels[0]); axes[0].legend(); axes[0].grid(True)
+
+axes[1].plot(true_bladder[:n_show], label="القيمة الحقيقية", alpha=0.8)
+axes[1].plot(pred_bladder[:n_show], label="القيمة المتوقعة", alpha=0.8, linestyle='--')
+axes[1].set_title(labels[1]); axes[1].legend(); axes[1].grid(True)
+
+axes[2].plot(true_heart[:n_show], label="القيمة الحقيقية", alpha=0.8)
+axes[2].plot(pred_heart[:n_show], label="القيمة المتوقعة", alpha=0.8, linestyle='--')
+axes[2].set_title(labels[2]); axes[2].legend(); axes[2].grid(True)
+
+plt.tight_layout()
+plt.show()
+
+# ------------------------------------------
+# 9. متوسط الخطأ المطلق (MAE)
+# ------------------------------------------
+mae_g = mean_absolute_error(true_glucose, pred_glucose)
+mae_b = mean_absolute_error(true_bladder, pred_bladder)
+mae_h = mean_absolute_error(true_heart, pred_heart)
+
+print("متوسط الخطأ المطلق (MAE) على بيانات الاختبار:")
+print(f"  الجلوكوز: ± {mae_g:.3f} mg/dL")
+print(f"  المثانة : ± {mae_b:.3f} mmHg")
+print(f"  القلب   : ± {mae_h:.3f} bpm")
+print("\nتمت المحاكاة بنجاح.")
